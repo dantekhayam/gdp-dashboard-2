@@ -1,151 +1,143 @@
 import streamlit as st
 import pandas as pd
-import math
-from pathlib import Path
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+# Load and validate Excel data
+def load_loan_data(file):
+    try:
+        excel_data = pd.ExcelFile(file)
+        
+        # Check if the sheet 'Loan Data' exists
+        if 'Loan Data' not in excel_data.sheet_names:
+            st.error("The uploaded file must contain a sheet named 'Loan Data'.")
+            return None
+        
+        # Load and clean the 'Loan Data' sheet
+        loan_data = excel_data.parse('Loan Data')
+        loan_data.columns = loan_data.iloc[0]  # Set the first row as header
+        loan_data = loan_data.drop(0).reset_index(drop=True)  # Drop header row
+        loan_data.columns = loan_data.columns.str.strip()  # Strip whitespace from headers
+        
+        # Required columns check
+        required_columns = ['Loan ID', 'Loan Amount ($C)', 'Duration', 'Interest ($C)', 'Late Fee & Interest ($C)', 'Total Payment ($C)']
+        if not all(col in loan_data.columns for col in required_columns):
+            st.error("The 'Loan Data' sheet must contain all required columns.")
+            return None
+        
+        # Convert relevant columns to numeric, handle errors gracefully
+        for col in ['Loan Amount ($C)', 'Interest ($C)', 'Late Fee & Interest ($C)', 'Total Payment ($C)', 'Duration']:
+            loan_data[col] = pd.to_numeric(loan_data[col], errors='coerce')
+        
+        # Drop rows with any NaN values in required columns
+        loan_data.dropna(subset=required_columns, inplace=True)
+        
+        return loan_data[required_columns]
+    
+    except Exception as e:
+        st.error(f"Error loading data: {e}")
+        return None
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# Loan Calculator class
+class LoanCalculator:
+    def __init__(self, loan_amount, interest, late_fee, duration):
+        self.loan_amount = loan_amount
+        self.interest = interest
+        self.late_fee = late_fee
+        self.duration = duration
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+    def total_repayment(self):
+        return self.loan_amount + self.interest + self.late_fee
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+    def calculate_apr(self):
+        if self.loan_amount == 0 or self.duration == 0:
+            return 0
+        daily_interest = self.interest / self.loan_amount
+        return (daily_interest * 365 / self.duration) * 100
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+    def calculate_monthly_payment(self):
+        return self.total_repayment() / max((self.duration / 30), 1)
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+# ROI and Investment input handling
+def sync_roi_and_investment():
+    if 'initial_investment' not in st.session_state:
+        st.session_state['initial_investment'] = 1000.0  # Default investment
+    if 'roi_percentage' not in st.session_state:
+        st.session_state['roi_percentage'] = 5.0  # Default ROI
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+    # Event listeners to sync ROI and Initial Investment
+    def update_investment():
+        st.session_state['initial_investment'] = (st.session_state['roi_percentage'] / 100) * st.session_state['investment_amount']
+    
+    def update_roi():
+        st.session_state['roi_percentage'] = (st.session_state['initial_investment'] / st.session_state['investment_amount']) * 100
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+    st.sidebar.number_input("Initial Investment ($C)", value=st.session_state['initial_investment'], on_change=update_roi, key='initial_investment')
+    st.sidebar.number_input("ROI (%)", value=st.session_state['roi_percentage'], on_change=update_investment, key='roi_percentage')
 
-    return gdp_df
+# Visualization functions
+def plot_apr_comparison(apr, loan_id):
+    apr_values = [apr, 30, 50, 100]  # Example APR values for comparison
+    labels = [loan_id, "Competitor A", "Competitor B", "Industry Average"]
+    
+    fig, ax = plt.subplots(figsize=(8, 4))
+    bars = ax.barh(labels, apr_values, color=['#4CAF50', '#FFC107', '#FF5722', '#2196F3'])
+    ax.set_xlabel('APR (%)')
+    ax.set_title('APR Comparison with Industry')
+    ax.grid(axis='x', linestyle='--', alpha=0.7)
+    for bar in bars:
+        ax.text(bar.get_width() + 1, bar.get_y() + bar.get_height() / 2, f'{bar.get_width():.2f}%', va='center')
+    st.pyplot(fig)
 
-gdp_df = get_gdp_data()
+# Streamlit interface
+st.title("Payday Loan Dashboard")
+st.sidebar.title("Loan Calculator Inputs")
 
-# -----------------------------------------------------------------------------
-# Draw the actual page
+# Sync ROI and investment inputs
+sync_roi_and_investment()
 
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
+# File uploader for loan data
+uploaded_file = st.sidebar.file_uploader("Upload an Excel file", type=["xlsx"])
+if uploaded_file:
+    loan_data = load_loan_data(uploaded_file)
+    if loan_data is not None:
+        
+        # Show loaded data
+        st.write("### Loaded Loan Data")
+        st.dataframe(loan_data)
 
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+        # Loan ID selection
+        loan_ids = loan_data['Loan ID'].unique()
+        selected_loan_id = st.sidebar.selectbox("Select Loan ID:", loan_ids)
+        
+        # Filter data for selected loan
+        selected_loan_data = loan_data[loan_data['Loan ID'] == selected_loan_id].iloc[0]
+        
+        # Extract loan parameters
+        loan_amount = selected_loan_data['Loan Amount ($C)']
+        interest = selected_loan_data['Interest ($C)']
+        late_fee = selected_loan_data['Late Fee & Interest ($C)'] if pd.notnull(selected_loan_data['Late Fee & Interest ($C)']) else 0.0
+        duration = selected_loan_data['Duration']
+        
+        # Calculate metrics
+        calculator = LoanCalculator(loan_amount, interest, late_fee, duration)
+        total_repayment = calculator.total_repayment()
+        apr = calculator.calculate_apr()
+        monthly_payment = calculator.calculate_monthly_payment()
+        
+        # Display loan details
+        st.write("### Loan Details")
+        st.write(f"**Loan Amount:** ${loan_amount:,.2f}")
+        st.write(f"**Interest:** ${interest:,.2f}")
+        st.write(f"**Late Fee & Interest:** ${late_fee:,.2f}")
+        st.write(f"**Duration:** {duration} days")
+        st.write(f"**Total Repayment:** ${total_repayment:,.2f}")
+        st.write(f"**Effective APR:** {apr:.2f}%")
+        st.write(f"**Estimated Monthly Payment:** ${monthly_payment:,.2f}")
+        
+        # Display visualizations
+        st.subheader("APR Comparison")
+        plot_apr_comparison(apr, selected_loan_id)
+else:
+    st.write("Please upload an Excel file to proceed.")
